@@ -34,7 +34,7 @@ struct WebsocketContext
     dmConnectionPool::HPool         m_Pool;
     uint32_t                        m_Initialized:1;
     wsHttpServer::HServer           m_Server;
-    char* m_SecretKeyTmp;
+    dmScript::LuaCallbackInfo*      m_ServerCallback;
 
 } g_Websocket;
 
@@ -459,14 +459,6 @@ static int LuaSend(lua_State* L)
     return 0;
 }
 
-void HttpServerHeader(void* user_data, const char* key, const char* value)
-{
-    dmLogInfo("HEADER %s: %s", key, value);
-    if (strcmp(key, "Sec-WebSocket-Key") == 0) {
-        g_Websocket.m_SecretKeyTmp = strdup(value);
-    }
-}
-
 void HttpServerRequestCallback(void* user_data, wsHttpServer::Request* request)
 {
     //dmLogInfo("Request length %d", request->m_ContentLength);
@@ -484,14 +476,8 @@ void HttpServerRequestCallback(void* user_data, wsHttpServer::Request* request)
     conn->m_ConnectTimeout = dmTime::GetTime() + 3000 * 1000;
     conn->m_CustomHeaders = 0;
     conn->m_Protocol = 0;
-    /*uint32_t dst_len = 0;
-    if (!dmCrypt::Base64Decode((unsigned char*)g_Websocket.m_SecretKeyTmp, strlen(g_Websocket.m_SecretKeyTmp), conn->m_Key, &dst_len))
-    {
-        SetStatus(conn, RESULT_HANDSHAKE_FAILED, "Failed to base64 decode key");
-        return;
-    }*
 
-    /*conn->m_Callback = dmScript::CreateCallback(L, 3);*/
+    conn->m_Callback = g_Websocket.m_ServerCallback;
 
     if (g_Websocket.m_Connections.Full())
         g_Websocket.m_Connections.OffsetCapacity(2);
@@ -512,6 +498,7 @@ static int LuaListen(lua_State* L)
 
     const int port = luaL_checkinteger(L, 1);
     const char* path = luaL_checkstring(L, 2);
+    g_Websocket.m_ServerCallback = dmScript::CreateCallback(L, 3);
 
     wsHttpServer::NewParams http_params;
     http_params.m_Userdata = 0;
@@ -935,7 +922,6 @@ static dmExtension::Result OnUpdate(dmExtension::Params* params)
                 continue;
             }
 
-            dmLogInfo("STATE_SERVER_HANDSHAKE_READ 1");
             Result result = ReceiveHeaders(conn);
             if (RESULT_WOULDBLOCK == result)
             {
@@ -949,16 +935,12 @@ static dmExtension::Result OnUpdate(dmExtension::Params* params)
             }
 
             // Verifies headers, and also stages any initial sent data
-            dmLogInfo("STATE_SERVER_HANDSHAKE_READ 2");
             result = VerifyServerHeaders(conn);
             if (RESULT_OK != result)
             {
-                dmLogInfo("Failed verifying handshake headers:\n%s\n\n", conn->m_Buffer);
                 CLOSE_CONN("Failed verifying handshake headers:\n%s\n\n", conn->m_Buffer);
                 continue;
             }
-
-            dmLogInfo("STATE_SERVER_HANDSHAKE_READ 3");
 
             SetState(conn, STATE_SERVER_HANDSHAKE_WRITE);
         }
@@ -971,24 +953,29 @@ static dmExtension::Result OnUpdate(dmExtension::Params* params)
                 continue;
             }
 
+            dmLogInfo("STATE_SERVER_HANDSHAKE_WRITE 1");
             Result result = SendServerHandshake(conn);
             if (RESULT_WOULDBLOCK == result)
             {
                 continue;
             }
+            dmLogInfo("STATE_SERVER_HANDSHAKE_WRITE 2");
             if (RESULT_OK != result)
             {
                 CLOSE_CONN("Failed sending handshake: %d", result);
                 continue;
             }
+            dmLogInfo("STATE_SERVER_HANDSHAKE_WRITE 3");
 
 #if defined(HAVE_WSLAY)
             int r = WSL_Init(&conn->m_Ctx, g_Websocket.m_BufferSize, (void*)conn);
+            dmLogInfo("STATE_SERVER_HANDSHAKE_WRITE 4");
             if (0 != r)
             {
                 CLOSE_CONN("Failed initializing wslay: %s", WSL_ResultToString(r));
                 continue;
             }
+            dmLogInfo("STATE_SERVER_HANDSHAKE_WRITE 5");
 
             dmSocket::SetNoDelay(conn->m_Socket, true);
             // Don't go lower than 1000 since some platforms might not have that good precision
@@ -997,9 +984,11 @@ static dmExtension::Result OnUpdate(dmExtension::Params* params)
                 dmSSLSocket::SetReceiveTimeout(conn->m_SSLSocket, 1000);
 
             dmSocket::SetBlocking(conn->m_Socket, false);
+            dmLogInfo("STATE_SERVER_HANDSHAKE_WRITE 6");
 #endif
             SetState(conn, STATE_CONNECTED);
             HandleCallback(conn, EVENT_CONNECTED, 0, 0);
+            dmLogInfo("STATE_SERVER_HANDSHAKE_WRITE 7");
         }
         else if (STATE_CREATE == conn->m_State)
         {

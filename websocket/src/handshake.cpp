@@ -18,28 +18,35 @@ static void CreateKey(uint8_t* key, size_t len)
 }
 
 
-static void ComputeAcceptKey(WebsocketConnection* conn, uint8_t* client_key)
+static void ComputeAcceptKey(WebsocketConnection* conn, uint8_t* client_key, uint32_t client_key_len)
 {
-    uint32_t client_key_len = sizeof(client_key);
+    uint32_t buffer_length = client_key_len;
+    dmLogInfo("len %d, sizeof %lu, key0 %d, key1 %d", client_key_len, sizeof(conn->m_Key), conn->m_Key[0], conn->m_Key[1]);
     dmCrypt::Base64Encode(conn->m_Key, sizeof(conn->m_Key), client_key, &client_key_len);
+    dmLogInfo("client_key_len %d", client_key_len);
     client_key[client_key_len] = 0;
 
+    dmLogInfo("Secret key (base64): %s", (char*)client_key);
     DebugLog(2, "Secret key (base64): %s", client_key);
 
     memcpy(client_key + client_key_len, RFC_MAGIC, strlen(RFC_MAGIC));
+    dmLogInfo("mem");
     client_key_len += strlen(RFC_MAGIC);
     client_key[client_key_len] = 0;
 
+    dmLogInfo("Secret key + RFC_MAGIC: %s", (char*)client_key);
     DebugLog(2, "Secret key + RFC_MAGIC: %s", client_key);
 
     uint8_t client_key_sha1[20];
     dmCrypt::HashSha1(client_key, client_key_len, client_key_sha1);
 
+    dmLogInfo("Hashed key (sha1): %s, %lu", client_key_sha1, sizeof(client_key_sha1));
     DebugPrint(2, "Hashed key (sha1):", client_key_sha1, sizeof(client_key_sha1));
 
-    client_key_len = sizeof(client_key);
+    client_key_len = buffer_length;
     dmCrypt::Base64Encode(client_key_sha1, sizeof(client_key_sha1), client_key, &client_key_len);
     client_key[client_key_len] = 0;
+    dmLogInfo("Client key (base64): %s", (char*)client_key);
     DebugLog(2, "Client key (base64): %s", client_key);
 }
 
@@ -117,8 +124,10 @@ bail:
 
 static Result SendServerHandshakeHeaders(WebsocketConnection* conn)
 {
+    dmLogInfo("1");
     uint8_t encoded_accept_key[32 + 40];
-    ComputeAcceptKey(conn, encoded_accept_key);
+    ComputeAcceptKey(conn, encoded_accept_key, sizeof(encoded_accept_key));
+    dmLogInfo("encoded key %s", (char*)encoded_accept_key);
 
     dmSocket::Result sr;
     WS_SENDALL("HTTP/1.1 101 Switching Protocols\r\n");
@@ -128,6 +137,7 @@ static Result SendServerHandshakeHeaders(WebsocketConnection* conn)
     WS_SENDALL((char*)encoded_accept_key);
     WS_SENDALL("\r\n");
     WS_SENDALL("Sec-WebSocket-Version: 13\r\n");
+    dmLogInfo("3");
 
     if (conn->m_CustomHeaders)
     {
@@ -140,12 +150,14 @@ static Result SendServerHandshakeHeaders(WebsocketConnection* conn)
             WS_SENDALL("\r\n");
         }
     }
+    dmLogInfo("4");
 
     if (conn->m_Protocol) {
         WS_SENDALL("Sec-WebSocket-Protocol: ");
         WS_SENDALL(conn->m_Protocol);
         WS_SENDALL("\r\n");
     }
+    dmLogInfo("5");
 
     WS_SENDALL("\r\n");
 
@@ -154,6 +166,7 @@ bail:
     {
         return SetStatus(conn, RESULT_HANDSHAKE_FAILED, "SendServerHandshake failed: %s", dmSocket::ResultToString(sr));
     }
+    dmLogInfo("6");
 
     return RESULT_OK;
 }
@@ -466,7 +479,6 @@ Result VerifyHeaders(WebsocketConnection* conn)
 Result VerifyServerHeaders(WebsocketConnection* conn)
 {
     char* r = conn->m_Buffer;
-    dmLogInfo("buffer: %s", r);
 
     // Find start of payload now because dmHttpClient::ParseHeader is destructive
     const char* start_of_payload = strstr(conn->m_Buffer, "\r\n\r\n");
@@ -477,7 +489,6 @@ Result VerifyServerHeaders(WebsocketConnection* conn)
     dmHttpClient::ParseResult parse_result = ParseRequestHeader(r, request, true, &HandleVersion, &HandleHeader, &HandleContent);
     if (parse_result != dmHttpClient::ParseResult::PARSE_RESULT_OK)
     {
-        dmLogInfo("Failed to parse handshake request. 'dmHttpClient::ParseResult=%i'", parse_result);
         return SetStatus(conn, RESULT_HANDSHAKE_FAILED, "Failed to parse handshake request. 'dmHttpClient::ParseResult=%i'", parse_result);
     }
 
@@ -501,7 +512,6 @@ Result VerifyServerHeaders(WebsocketConnection* conn)
     bool ok = connection && upgrade && valid_key;
     if(!ok)
     {
-        dmLogInfo("RESULT_HANDSHAKE_FAILED");
         return RESULT_HANDSHAKE_FAILED;
     }
 
