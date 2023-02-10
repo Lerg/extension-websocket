@@ -41,8 +41,10 @@ namespace dmWebsocket
     {
         STATE_CREATE,
         STATE_CONNECTING,
-        STATE_HANDSHAKE_WRITE,
-        STATE_HANDSHAKE_READ,
+        STATE_CLIENT_HANDSHAKE_WRITE,
+        STATE_CLIENT_HANDSHAKE_READ,
+        STATE_SERVER_HANDSHAKE_READ,
+        STATE_SERVER_HANDSHAKE_WRITE,
         STATE_CONNECTED,
         STATE_DISCONNECTING,
         STATE_DISCONNECTED,
@@ -156,6 +158,8 @@ namespace dmWebsocket
     Result SendClientHandshake(WebsocketConnection* conn);
     Result ReceiveHeaders(WebsocketConnection* conn);
     Result VerifyHeaders(WebsocketConnection* conn);
+    Result VerifyServerHeaders(WebsocketConnection* conn);
+    Result SendServerHandshake(WebsocketConnection* conn);
 
     // Callback to Lua
     void HandleCallback(WebsocketConnection* conn, int event, int msg_offset, int msg_length);

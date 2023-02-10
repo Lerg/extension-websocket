@@ -17,6 +17,33 @@ static void CreateKey(uint8_t* key, size_t len)
     }
 }
 
+
+static void ComputeAcceptKey(WebsocketConnection* conn, uint8_t* client_key)
+{
+    uint32_t client_key_len = sizeof(client_key);
+    dmCrypt::Base64Encode(conn->m_Key, sizeof(conn->m_Key), client_key, &client_key_len);
+    client_key[client_key_len] = 0;
+
+    DebugLog(2, "Secret key (base64): %s", client_key);
+
+    memcpy(client_key + client_key_len, RFC_MAGIC, strlen(RFC_MAGIC));
+    client_key_len += strlen(RFC_MAGIC);
+    client_key[client_key_len] = 0;
+
+    DebugLog(2, "Secret key + RFC_MAGIC: %s", client_key);
+
+    uint8_t client_key_sha1[20];
+    dmCrypt::HashSha1(client_key, client_key_len, client_key_sha1);
+
+    DebugPrint(2, "Hashed key (sha1):", client_key_sha1, sizeof(client_key_sha1));
+
+    client_key_len = sizeof(client_key);
+    dmCrypt::Base64Encode(client_key_sha1, sizeof(client_key_sha1), client_key, &client_key_len);
+    client_key[client_key_len] = 0;
+    DebugLog(2, "Client key (base64): %s", client_key);
+}
+
+
 #define WS_SENDALL(s) \
     sr = Send(conn, s, strlen(s), 0);\
     if (sr != dmSocket::RESULT_OK)\
@@ -88,6 +115,49 @@ bail:
     return RESULT_OK;
 }
 
+static Result SendServerHandshakeHeaders(WebsocketConnection* conn)
+{
+    uint8_t encoded_accept_key[32 + 40];
+    ComputeAcceptKey(conn, encoded_accept_key);
+
+    dmSocket::Result sr;
+    WS_SENDALL("HTTP/1.1 101 Switching Protocols\r\n");
+    WS_SENDALL("Upgrade: websocket\r\n");
+    WS_SENDALL("Connection: Upgrade\r\n");
+    WS_SENDALL("Sec-WebSocket-Accept: ");
+    WS_SENDALL((char*)encoded_accept_key);
+    WS_SENDALL("\r\n");
+    WS_SENDALL("Sec-WebSocket-Version: 13\r\n");
+
+    if (conn->m_CustomHeaders)
+    {
+        WS_SENDALL(conn->m_CustomHeaders);
+        // make sure we ended with '\r\n'
+        int len = strlen(conn->m_CustomHeaders);
+        bool ended_with_sentinel = len >= 2 && conn->m_CustomHeaders[len - 2] == '\r' && conn->m_CustomHeaders[len - 1] == '\n';
+        if (!ended_with_sentinel)
+        {
+            WS_SENDALL("\r\n");
+        }
+    }
+
+    if (conn->m_Protocol) {
+        WS_SENDALL("Sec-WebSocket-Protocol: ");
+        WS_SENDALL(conn->m_Protocol);
+        WS_SENDALL("\r\n");
+    }
+
+    WS_SENDALL("\r\n");
+
+bail:
+    if (sr != dmSocket::RESULT_OK)
+    {
+        return SetStatus(conn, RESULT_HANDSHAKE_FAILED, "SendServerHandshake failed: %s", dmSocket::ResultToString(sr));
+    }
+
+    return RESULT_OK;
+}
+
 #undef WS_SENDALL
 
 Result SendClientHandshake(WebsocketConnection* conn)
@@ -108,6 +178,27 @@ Result SendClientHandshake(WebsocketConnection* conn)
 #else
     return SendClientHandshakeHeaders(conn);
 #endif
+}
+
+
+Result SendServerHandshake(WebsocketConnection* conn)
+{
+    dmSocket::Result sr = WaitForSocket(conn, dmSocket::SELECTOR_KIND_WRITE, SOCKET_WAIT_TIMEOUT);
+    if (dmSocket::RESULT_WOULDBLOCK == sr)
+    {
+        return RESULT_WOULDBLOCK;
+    }
+    if (dmSocket::RESULT_OK != sr)
+    {
+        return SetStatus(conn, RESULT_HANDSHAKE_FAILED, "Connection not ready for sending data: %s", dmSocket::ResultToString(sr));
+    }
+
+    // In emscripten, the sockets are actually already websockets, so no handshake necessary
+    #if defined(__EMSCRIPTEN__)
+        return RESULT_OK;
+    #else
+        return SendServerHandshakeHeaders(conn);
+    #endif
 }
 
 
@@ -199,6 +290,88 @@ static void HandleContent(void* user_data, int offset)
     response->m_BodyOffset = offset;
 }
 
+ dmHttpClient::ParseResult ParseRequestHeader(char* header_str,
+                            void* user_data,
+                            bool end_of_receive,
+                            void (*version)(void* user_data, int major, int minor, int status, const char* status_str),
+                            void (*header)(void* user_data, const char* key, const char* value),
+                            void (*body)(void* user_data, int offset))
+{
+    // Check if we have a body section by searching for two new-lines, do this before parsing version since we do destructive string termination
+    char* body_start = strstr(header_str, "\r\n\r\n");
+
+    // Always try to parse version and status
+    char* version_str = header_str;
+    char* end_version = strstr(header_str, "\r\n");
+    if (end_version == 0)
+        return  dmHttpClient::PARSE_RESULT_NEED_MORE_DATA;
+
+    char store_end_version = *end_version;
+    *end_version = '\0';
+
+    char method[20];
+    char path[1024];
+    int major, minor;
+    int count = sscanf(version_str, "%s %s HTTP/%d.%d", method, path, &major, &minor);
+    if (count != 4)
+    {
+        return  dmHttpClient::PARSE_RESULT_SYNTAX_ERROR;
+    }
+
+    if (body_start != 0)
+    {
+        // Skip \r\n\r\n
+        body_start += 4;
+    }
+    else
+    {
+        // According to the HTTP spec, all responses should end with double line feed to indicate end of headers
+        // Unfortunately some server implementations only end with one linefeed if the response is '204 No Content' so we take special measures
+        // to force parsing of headers if we have received no more data and the we get a 204 status
+        if(end_of_receive)
+        {
+            // Treat entire input as just headers
+            body_start = (end_version + 1) + strlen(end_version + 1);
+        }
+        else
+        {
+            // Restore string termination since we need more data and will likely try again
+            *end_version = store_end_version;
+            return dmHttpClient::PARSE_RESULT_NEED_MORE_DATA;
+        }
+    }
+
+    version(user_data, major, minor, 0, "");
+
+    char store_body_start = *body_start;
+    *body_start = '\0'; // Terminate headers (up to body)
+    char* tok;
+    char* last;
+    tok = dmStrTok(end_version + 2, "\r\n", &last);
+    while (tok)
+    {
+        char* colon = strstr(tok, ":");
+        if (!colon)
+            return  dmHttpClient::PARSE_RESULT_SYNTAX_ERROR;
+
+        char* value = colon + 1;
+        while (*value == ' ') {
+            value++;
+        }
+
+        int c = *colon;
+        *colon = '\0';
+        header(user_data, tok, value);
+        *colon = c;
+        tok = dmStrTok(0, "\r\n", &last);
+    }
+    *body_start = store_body_start;
+
+    body(user_data, (int) (body_start - header_str));
+
+    return  dmHttpClient::PARSE_RESULT_OK;
+}
+
 
 bool ValidateSecretKey(WebsocketConnection* conn, const char* server_key)
 {
@@ -282,6 +455,60 @@ Result VerifyHeaders(WebsocketConnection* conn)
     conn->m_HandshakeResponse = 0;
 
     // The response might contain both the headers, but also (if successful) the first batch of data
+    uint32_t size = conn->m_BufferSize - (start_of_payload - conn->m_Buffer);
+    conn->m_BufferSize = size;
+    memmove(conn->m_Buffer, start_of_payload, size);
+    conn->m_Buffer[size] = 0;
+    conn->m_HasHandshakeData = conn->m_BufferSize != 0 ? 1 : 0;
+    return RESULT_OK;
+}
+
+Result VerifyServerHeaders(WebsocketConnection* conn)
+{
+    char* r = conn->m_Buffer;
+    dmLogInfo("buffer: %s", r);
+
+    // Find start of payload now because dmHttpClient::ParseHeader is destructive
+    const char* start_of_payload = strstr(conn->m_Buffer, "\r\n\r\n");
+    start_of_payload += 4;
+
+    HandshakeResponse* request = new HandshakeResponse();
+    conn->m_HandshakeResponse = request;
+    dmHttpClient::ParseResult parse_result = ParseRequestHeader(r, request, true, &HandleVersion, &HandleHeader, &HandleContent);
+    if (parse_result != dmHttpClient::ParseResult::PARSE_RESULT_OK)
+    {
+        dmLogInfo("Failed to parse handshake request. 'dmHttpClient::ParseResult=%i'", parse_result);
+        return SetStatus(conn, RESULT_HANDSHAKE_FAILED, "Failed to parse handshake request. 'dmHttpClient::ParseResult=%i'", parse_result);
+    }
+
+    HttpHeader *connection_header, *upgrade_header, *websocket_secret_header;
+    connection_header = request->GetHeader("Connection");
+    upgrade_header = request->GetHeader("Upgrade");
+    websocket_secret_header = request->GetHeader("Sec-WebSocket-Key");
+    bool connection = connection_header && dmStrCaseCmp(connection_header->m_Value, "Upgrade") == 0;
+    bool upgrade  = upgrade_header && dmStrCaseCmp(upgrade_header->m_Value, "websocket") == 0;
+    uint32_t dst_len = 16;
+    bool valid_key = websocket_secret_header && dmCrypt::Base64Decode((unsigned char*)websocket_secret_header->m_Value, strlen(websocket_secret_header->m_Value), conn->m_Key, &dst_len);
+
+    // Send error to lua?
+    if (!connection)
+        dmLogError("Failed to find the Connection keyword in the request headers");
+    if (!upgrade)
+        dmLogError("Failed to find the Upgrade keyword in the request headers");
+    if (!valid_key)
+        dmLogError("Failed to find valid key in the request headers");
+
+    bool ok = connection && upgrade && valid_key;
+    if(!ok)
+    {
+        dmLogInfo("RESULT_HANDSHAKE_FAILED");
+        return RESULT_HANDSHAKE_FAILED;
+    }
+
+    delete conn->m_HandshakeResponse;
+    conn->m_HandshakeResponse = 0;
+
+    // The request might contain both the headers, but also (if successful) the first batch of data
     uint32_t size = conn->m_BufferSize - (start_of_payload - conn->m_Buffer);
     conn->m_BufferSize = size;
     memmove(conn->m_Buffer, start_of_payload, size);
