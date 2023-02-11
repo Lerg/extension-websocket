@@ -101,6 +101,8 @@ namespace dmWebsocket
         int m_HttpMinor;
         int m_ResponseStatusCode;
         int m_BodyOffset;
+        char m_Method[20];
+        char m_Resource[1024];
         dmArray<HttpHeader*> m_Headers;
 
         ~HandshakeResponse();
@@ -137,6 +139,8 @@ namespace dmWebsocket
         uint8_t                         m_HasHandshakeData:1;
         uint8_t                         :7;
         HandshakeResponse*              m_HandshakeResponse;
+        char                            m_RequestMethod[20];
+        char                            m_RequestResource[1024];
     };
 
     // Set error message

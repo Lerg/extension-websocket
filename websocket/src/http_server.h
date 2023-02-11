@@ -75,7 +75,7 @@ namespace wsHttpServer
         // Number of bytes in send buffer
         uint32_t m_SendBufferPos;
 
-        uint16_t m_CloseConnection : 1;
+        uint16_t m_RemoveConnection : 1;
         uint16_t m_HeaderSent : 1;
         uint16_t m_AttributesSent : 1;
 

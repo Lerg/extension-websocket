@@ -149,45 +149,38 @@ namespace wsHttpServer
 
     void Delete(HServer server)
     {
-        // TODO: Shutdown connections
-        dmSocket::Delete(server->m_ServerSocket);
-        delete server;
-    }
-
-    static void HandleRequest(void* user_data, const char* request_method, const char* resource, int major, int minor)
-    {
-        Request* req = (Request*) user_data;
-
-        dmStrlCpy(req->m_Method, request_method, sizeof(req->m_Method));
-        dmStrlCpy(req->m_Resource, resource, sizeof(req->m_Resource));
-
-        if ((major << 16 | minor) < (1 << 16 | 1))
+        for (int32_t i; i < server->m_Connections.Size(); ++i)
         {
-            // Close connection for HTTP protocol version < 1.1
-            req->m_CloseConnection = 1;
-        } else {
-
+            dmSocket::Shutdown(server->m_Connections[i].m_Socket, dmSocket::SHUTDOWNTYPE_READWRITE);
+            dmSocket::Delete(server->m_Connections[i].m_Socket);
+            server->m_Connections[i].m_Socket = dmSocket::INVALID_SOCKET_HANDLE;
         }
+        server->m_Connections.SetSize(0);
+        dmSocket::Shutdown(server->m_ServerSocket, dmSocket::SHUTDOWNTYPE_READWRITE);
+        dmSocket::Delete(server->m_ServerSocket);
+        server->m_ServerSocket = dmSocket::INVALID_SOCKET_HANDLE;
+        delete server;
     }
 
     /*
      * Handle an http-connection
-     * Returns false if the connection should be closed
+     * Returns false if the connection should be removed
      */
     static bool HandleConnection(Server* server, Connection* connection)
     {
         int total_recv = 0;
 
-        Request internal_req;
-        internal_req.m_Result = RESULT_OK;
-        internal_req.m_Socket = connection->m_Socket;
-        internal_req.m_Server = server;
+        Request request;
+        request.m_Result = RESULT_OK;
+        request.m_Socket = connection->m_Socket;
+        request.m_Server = server;
 
-        server->m_HttpRequest(server->m_Userdata, &internal_req);
+        server->m_HttpRequest(server->m_Userdata, &request);
+        connection->m_RequestCount = 1;
 
-        if (internal_req.m_Result == RESULT_OK)
+        if (request.m_Result == RESULT_OK)
         {
-            return (bool) !internal_req.m_CloseConnection;
+            return (bool) !request.m_RemoveConnection;
         }
         else
         {
@@ -234,6 +227,7 @@ namespace wsHttpServer
                     memset(&connection, 0, sizeof(connection));
                     connection.m_Socket = client_socket;
                     connection.m_ConnectionTimeStart = dmTime::GetTime();
+                    connection.m_RequestCount = 0;
                     server->m_Connections.Push(connection);
                 }
             }
@@ -282,9 +276,6 @@ namespace wsHttpServer
                 bool keep_connection = HandleConnection(server, connection);
                 if (!keep_connection)
                 {
-                    dmSocket::Shutdown(connection->m_Socket, dmSocket::SHUTDOWNTYPE_READWRITE);
-                    dmSocket::Delete(connection->m_Socket);
-                    connection->m_Socket = dmSocket::INVALID_SOCKET_HANDLE;
                     server->m_Connections.EraseSwap(i);
                     --i;
                 }

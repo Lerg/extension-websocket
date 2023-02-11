@@ -64,8 +64,11 @@ local function websocket_callback(self, conn, data)
 		self.connection = nil
 		update_gui(self)
 	elseif data.event == websocket.EVENT_CONNECTED then
-		update_gui(self)
 		log("Connected: " .. tostring(conn))
+		self.connection = conn
+		pprint(data)
+		self.url = data.ip_address
+		update_gui(self)
 	elseif data.event == websocket.EVENT_ERROR then
 		log("Error: '" .. tostring(data.message) .. "'")
 		if data.handshake_response then
@@ -120,7 +123,7 @@ function on_input(self, action_id, action)
 	elseif click_button(self.stop_listening_node, action) then
 		stop_listening(self)
 	elseif click_button(gui.get_node("send/button"), action) then
-		local message_to_send = 'sending to server'
+		local message_to_send = "Hello, Socket!"
 		local ok, was_clean, code, reason = websocket.send(self.connection, message_to_send)
 		log("Sending '" .. message_to_send .. "'", ok, was_clean, code, reason)
 	elseif click_button(gui.get_node("close/button"), action) then

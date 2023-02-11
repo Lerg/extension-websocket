@@ -21,32 +21,25 @@ static void CreateKey(uint8_t* key, size_t len)
 static void ComputeAcceptKey(WebsocketConnection* conn, uint8_t* client_key, uint32_t client_key_len)
 {
     uint32_t buffer_length = client_key_len;
-    dmLogInfo("len %d, sizeof %lu, key0 %d, key1 %d", client_key_len, sizeof(conn->m_Key), conn->m_Key[0], conn->m_Key[1]);
     dmCrypt::Base64Encode(conn->m_Key, sizeof(conn->m_Key), client_key, &client_key_len);
-    dmLogInfo("client_key_len %d", client_key_len);
     client_key[client_key_len] = 0;
 
-    dmLogInfo("Secret key (base64): %s", (char*)client_key);
     DebugLog(2, "Secret key (base64): %s", client_key);
 
     memcpy(client_key + client_key_len, RFC_MAGIC, strlen(RFC_MAGIC));
-    dmLogInfo("mem");
     client_key_len += strlen(RFC_MAGIC);
     client_key[client_key_len] = 0;
 
-    dmLogInfo("Secret key + RFC_MAGIC: %s", (char*)client_key);
     DebugLog(2, "Secret key + RFC_MAGIC: %s", client_key);
 
     uint8_t client_key_sha1[20];
     dmCrypt::HashSha1(client_key, client_key_len, client_key_sha1);
 
-    dmLogInfo("Hashed key (sha1): %s, %lu", client_key_sha1, sizeof(client_key_sha1));
     DebugPrint(2, "Hashed key (sha1):", client_key_sha1, sizeof(client_key_sha1));
 
     client_key_len = buffer_length;
     dmCrypt::Base64Encode(client_key_sha1, sizeof(client_key_sha1), client_key, &client_key_len);
     client_key[client_key_len] = 0;
-    dmLogInfo("Client key (base64): %s", (char*)client_key);
     DebugLog(2, "Client key (base64): %s", client_key);
 }
 
@@ -124,10 +117,8 @@ bail:
 
 static Result SendServerHandshakeHeaders(WebsocketConnection* conn)
 {
-    dmLogInfo("1");
     uint8_t encoded_accept_key[32 + 40];
     ComputeAcceptKey(conn, encoded_accept_key, sizeof(encoded_accept_key));
-    dmLogInfo("encoded key %s", (char*)encoded_accept_key);
 
     dmSocket::Result sr;
     WS_SENDALL("HTTP/1.1 101 Switching Protocols\r\n");
@@ -137,7 +128,6 @@ static Result SendServerHandshakeHeaders(WebsocketConnection* conn)
     WS_SENDALL((char*)encoded_accept_key);
     WS_SENDALL("\r\n");
     WS_SENDALL("Sec-WebSocket-Version: 13\r\n");
-    dmLogInfo("3");
 
     if (conn->m_CustomHeaders)
     {
@@ -150,14 +140,12 @@ static Result SendServerHandshakeHeaders(WebsocketConnection* conn)
             WS_SENDALL("\r\n");
         }
     }
-    dmLogInfo("4");
 
     if (conn->m_Protocol) {
         WS_SENDALL("Sec-WebSocket-Protocol: ");
         WS_SENDALL(conn->m_Protocol);
         WS_SENDALL("\r\n");
     }
-    dmLogInfo("5");
 
     WS_SENDALL("\r\n");
 
@@ -166,7 +154,6 @@ bail:
     {
         return SetStatus(conn, RESULT_HANDSHAKE_FAILED, "SendServerHandshake failed: %s", dmSocket::ResultToString(sr));
     }
-    dmLogInfo("6");
 
     return RESULT_OK;
 }
@@ -284,6 +271,16 @@ static void HandleVersion(void* user_data, int major, int minor, int status, con
 }
 
 
+static void HandleRequestVersion(void* user_data, int major, int minor, const char* method, const char* resource)
+{
+    HandshakeResponse* response = (HandshakeResponse*)user_data;
+    response->m_HttpMajor = major;
+    response->m_HttpMinor = minor;
+    strncpy(response->m_Method, method, sizeof(response->m_Method));
+    strncpy(response->m_Resource, resource, sizeof(response->m_Resource));
+}
+
+
 static void HandleHeader(void* user_data, const char* key, const char* value)
 {
     HandshakeResponse* response = (HandshakeResponse*)user_data;
@@ -306,7 +303,7 @@ static void HandleContent(void* user_data, int offset)
  dmHttpClient::ParseResult ParseRequestHeader(char* header_str,
                             void* user_data,
                             bool end_of_receive,
-                            void (*version)(void* user_data, int major, int minor, int status, const char* status_str),
+                            void (*version)(void* user_data, int major, int minor, const char* method, const char* resource),
                             void (*header)(void* user_data, const char* key, const char* value),
                             void (*body)(void* user_data, int offset))
 {
@@ -323,9 +320,9 @@ static void HandleContent(void* user_data, int offset)
     *end_version = '\0';
 
     char method[20];
-    char path[1024];
+    char resource[1024];
     int major, minor;
-    int count = sscanf(version_str, "%s %s HTTP/%d.%d", method, path, &major, &minor);
+    int count = sscanf(version_str, "%s %s HTTP/%d.%d", method, resource, &major, &minor);
     if (count != 4)
     {
         return  dmHttpClient::PARSE_RESULT_SYNTAX_ERROR;
@@ -354,7 +351,7 @@ static void HandleContent(void* user_data, int offset)
         }
     }
 
-    version(user_data, major, minor, 0, "");
+    version(user_data, major, minor, method, resource);
 
     char store_body_start = *body_start;
     *body_start = '\0'; // Terminate headers (up to body)
@@ -486,11 +483,13 @@ Result VerifyServerHeaders(WebsocketConnection* conn)
 
     HandshakeResponse* request = new HandshakeResponse();
     conn->m_HandshakeResponse = request;
-    dmHttpClient::ParseResult parse_result = ParseRequestHeader(r, request, true, &HandleVersion, &HandleHeader, &HandleContent);
+    dmHttpClient::ParseResult parse_result = ParseRequestHeader(r, request, true, &HandleRequestVersion, &HandleHeader, &HandleContent);
     if (parse_result != dmHttpClient::ParseResult::PARSE_RESULT_OK)
     {
         return SetStatus(conn, RESULT_HANDSHAKE_FAILED, "Failed to parse handshake request. 'dmHttpClient::ParseResult=%i'", parse_result);
     }
+    strlcpy(conn->m_RequestMethod, request->m_Method, sizeof(conn->m_RequestMethod));
+    strlcpy(conn->m_RequestResource, request->m_Resource, sizeof(conn->m_RequestResource));
 
     HttpHeader *connection_header, *upgrade_header, *websocket_secret_header;
     connection_header = request->GetHeader("Connection");

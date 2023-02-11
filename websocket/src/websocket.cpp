@@ -95,6 +95,8 @@ const char* StateToString(State err)
         STRING_CASE(STATE_CONNECTING);
         STRING_CASE(STATE_CLIENT_HANDSHAKE_WRITE);
         STRING_CASE(STATE_CLIENT_HANDSHAKE_READ);
+        STRING_CASE(STATE_SERVER_HANDSHAKE_WRITE);
+        STRING_CASE(STATE_SERVER_HANDSHAKE_READ);
         STRING_CASE(STATE_CONNECTED);
         STRING_CASE(STATE_DISCONNECTING);
         STRING_CASE(STATE_DISCONNECTED);
@@ -231,6 +233,8 @@ static WebsocketConnection* CreateConnection(const char* url)
     conn->m_HasHandshakeData = 0;
     conn->m_HandshakeResponse = 0;
     conn->m_ConnectionThread = 0;
+    conn->m_RequestMethod[0] = 0;
+    conn->m_RequestResource[0] = 0;
 
 #if defined(HAVE_WSLAY)
     conn->m_Ctx = 0;
@@ -251,12 +255,8 @@ static WebsocketConnection* ConvertToConnection(dmSocket::Socket socket)
     conn->m_BufferSize = 0;
     conn->m_ConnectTimeout = 0;
 
-    //dmURI::Parse(url, &conn->m_Url);
-
-    //if (strcmp(conn->m_Url.m_Scheme, "https") == 0)
-    strcpy(conn->m_Url.m_Scheme, "wss");
-
-    //conn->m_SSL = strcmp(conn->m_Url.m_Scheme, "wss") == 0 ? 1 : 0;
+    conn->m_SSL = 0;
+    conn->m_State = STATE_CREATE;
 
     conn->m_Callback = 0;
     conn->m_Connection = 0;
@@ -266,6 +266,8 @@ static WebsocketConnection* ConvertToConnection(dmSocket::Socket socket)
     conn->m_HasHandshakeData = 0;
     conn->m_HandshakeResponse = 0;
     conn->m_ConnectionThread = 0;
+    conn->m_RequestMethod[0] = 0;
+    conn->m_RequestResource[0] = 0;
 
 #if defined(HAVE_WSLAY)
     conn->m_Ctx = 0;
@@ -287,7 +289,7 @@ static void DestroyConnection(WebsocketConnection* conn)
     free((void*)conn->m_CustomHeaders);
     free((void*)conn->m_Protocol);
 
-    if (conn->m_Callback)
+    if (conn->m_Callback && conn->m_Callback != g_Websocket.m_ServerCallback)
         dmScript::DestroyCallback(conn->m_Callback);
 
 #if defined(__EMSCRIPTEN__)
@@ -461,16 +463,15 @@ static int LuaSend(lua_State* L)
 
 void HttpServerRequestCallback(void* user_data, wsHttpServer::Request* request)
 {
-    //dmLogInfo("Request length %d", request->m_ContentLength);
-    dmLogInfo("Request method %s, resource %s", request->m_Method, request->m_Resource);
-
-    request->m_CloseConnection = 0;
+    request->m_RemoveConnection = 1;
     request->m_StatusCode = 101;
 
     dmSocket::Address address;
     uint16_t port;
     dmSocket::GetName(request->m_Socket, &address, &port);
-    dmLogInfo("address %d.%d.%d.%d, port %d", address.m_address[0], address.m_address[1], address.m_address[2], address.m_address[3], port);
+    char* ip_address = dmSocket::AddressToIPString(address);
+    dmLogInfo("address %s, port %d", ip_address, port);
+    free(ip_address);
 
     WebsocketConnection* conn = ConvertToConnection(request->m_Socket);
     conn->m_ConnectTimeout = dmTime::GetTime() + 3000 * 1000;
@@ -528,6 +529,12 @@ static int LuaStopListening(lua_State* L)
     if (!g_Websocket.m_Server)
         return DM_LUA_ERROR("The web server is not initialized");
 
+    if (g_Websocket.m_ServerCallback)
+    {
+        dmScript::DestroyCallback(g_Websocket.m_ServerCallback);
+        g_Websocket.m_ServerCallback = 0;
+    }
+
     wsHttpServer::Delete(g_Websocket.m_Server);
     g_Websocket.m_Server = 0;
 }
@@ -580,6 +587,27 @@ void HandleCallback(WebsocketConnection* conn, int event, int msg_offset, int ms
 
         delete conn->m_HandshakeResponse;
         conn->m_HandshakeResponse = 0;
+    }
+
+    dmSocket::Address address;
+    uint16_t port;
+    dmSocket::GetName(conn->m_Socket, &address, &port);
+    char* ip_address = dmSocket::AddressToIPString(address);
+
+    lua_pushstring(L, ip_address);
+    lua_setfield(L, -2, "ip_address");
+    free(ip_address);
+
+    lua_pushinteger(L, port);
+    lua_setfield(L, -2, "port");
+
+    if (conn->m_RequestMethod[0] != 0)
+    {
+        lua_pushstring(L, conn->m_RequestMethod);
+        lua_setfield(L, -2, "request_method");
+
+        lua_pushstring(L, conn->m_RequestResource);
+        lua_setfield(L, -2, "request_resource");
     }
 
     if (event == EVENT_DISCONNECTED)
@@ -684,6 +712,7 @@ static dmExtension::Result AppInitialize(dmExtension::AppParams* params)
     g_Websocket.m_Pool = 0;
     g_Websocket.m_Initialized = 0;
     g_Websocket.m_Server = 0;
+    g_Websocket.m_ServerCallback = 0;
 
     dmConnectionPool::Params pool_params;
     pool_params.m_MaxConnections = dmConfigFile::GetInt(params->m_ConfigFile, "websocket.max_connections", 2);
@@ -953,29 +982,24 @@ static dmExtension::Result OnUpdate(dmExtension::Params* params)
                 continue;
             }
 
-            dmLogInfo("STATE_SERVER_HANDSHAKE_WRITE 1");
             Result result = SendServerHandshake(conn);
             if (RESULT_WOULDBLOCK == result)
             {
                 continue;
             }
-            dmLogInfo("STATE_SERVER_HANDSHAKE_WRITE 2");
             if (RESULT_OK != result)
             {
                 CLOSE_CONN("Failed sending handshake: %d", result);
                 continue;
             }
-            dmLogInfo("STATE_SERVER_HANDSHAKE_WRITE 3");
 
 #if defined(HAVE_WSLAY)
             int r = WSL_Init(&conn->m_Ctx, g_Websocket.m_BufferSize, (void*)conn);
-            dmLogInfo("STATE_SERVER_HANDSHAKE_WRITE 4");
             if (0 != r)
             {
                 CLOSE_CONN("Failed initializing wslay: %s", WSL_ResultToString(r));
                 continue;
             }
-            dmLogInfo("STATE_SERVER_HANDSHAKE_WRITE 5");
 
             dmSocket::SetNoDelay(conn->m_Socket, true);
             // Don't go lower than 1000 since some platforms might not have that good precision
@@ -984,11 +1008,9 @@ static dmExtension::Result OnUpdate(dmExtension::Params* params)
                 dmSSLSocket::SetReceiveTimeout(conn->m_SSLSocket, 1000);
 
             dmSocket::SetBlocking(conn->m_Socket, false);
-            dmLogInfo("STATE_SERVER_HANDSHAKE_WRITE 6");
 #endif
             SetState(conn, STATE_CONNECTED);
             HandleCallback(conn, EVENT_CONNECTED, 0, 0);
-            dmLogInfo("STATE_SERVER_HANDSHAKE_WRITE 7");
         }
         else if (STATE_CREATE == conn->m_State)
         {
