@@ -64,6 +64,7 @@ int WSL_Close(wslay_event_context_ptr ctx)
 {
     const char* reason = "";
     wslay_event_queue_close(ctx, WSLAY_CODE_NORMAL_CLOSURE, (const uint8_t*)reason, 0);
+    wslay_event_send(ctx); // Send event now or it won't be sent. At least in the server mode.
     return 0;
 }
 

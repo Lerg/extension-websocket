@@ -24,7 +24,7 @@
 
 namespace dmWebsocket {
 
-int g_DebugWebSocket = 10;
+int g_DebugWebSocket = 0;
 
 struct WebsocketContext
 {
