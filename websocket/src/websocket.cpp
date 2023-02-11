@@ -994,7 +994,7 @@ static dmExtension::Result OnUpdate(dmExtension::Params* params)
             }
 
 #if defined(HAVE_WSLAY)
-            int r = WSL_Init(&conn->m_Ctx, g_Websocket.m_BufferSize, (void*)conn);
+            int r = WSL_InitServer(&conn->m_Ctx, g_Websocket.m_BufferSize, (void*)conn);
             if (0 != r)
             {
                 CLOSE_CONN("Failed initializing wslay: %s", WSL_ResultToString(r));

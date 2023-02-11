@@ -174,6 +174,7 @@ namespace dmWebsocket
 #if defined(HAVE_WSLAY)
     // Wslay callbacks
     int     WSL_Init(wslay_event_context_ptr* ctx, ssize_t buffer_size, void* userctx);
+    int     WSL_InitServer(wslay_event_context_ptr* ctx, ssize_t buffer_size, void* userctx);
     void    WSL_Exit(wslay_event_context_ptr ctx);
     int     WSL_Close(wslay_event_context_ptr ctx);
     int     WSL_Poll(wslay_event_context_ptr ctx);
