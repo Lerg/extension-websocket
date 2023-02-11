@@ -38,41 +38,6 @@ struct WebsocketContext
 
 } g_Websocket;
 
-struct InternalHttpServerRequest
-{
-    wsHttpServer::Request  m_Request;
-    wsHttpServer::Result   m_Result;
-    dmSocket::Socket m_Socket;
-    wsHttpServer::Server*  m_Server;
-
-    char     m_Method[16];
-    char     m_Resource[128];
-
-    int      m_StatusCode;
-
-    // Offset to where content start in buffer. This the extra content read while parsing headers
-    // The value is adjusted in Receive when data is consumed
-    uint32_t m_ContentOffset;
-    // Total amount of data received in Server.m_Buffer
-    uint32_t m_TotalReceived;
-
-    // Total content received, ie the payload
-    uint32_t m_TotalContentReceived;
-
-    // Number of bytes in send buffer
-    uint32_t m_SendBufferPos;
-
-    uint16_t m_CloseConnection : 1;
-    uint16_t m_HeaderSent : 1;
-    uint16_t m_AttributesSent : 1;
-
-    InternalHttpServerRequest()
-    {
-        memset(this, 0, sizeof(*this));
-        m_StatusCode = 200;
-    }
-};
-
 #define STRING_CASE(_X) case _X: return #_X;
 
 const char* ResultToString(Result err)
@@ -318,7 +283,6 @@ static void DestroyConnection(WebsocketConnection* conn)
     DebugLog(2, "DestroyConnection: %p", conn);
 }
 
-
 static void CloseConnection(WebsocketConnection* conn)
 {
     // we want it to send this message in the polling
@@ -354,9 +318,6 @@ static bool IsConnectionValid(WebsocketConnection* conn)
     return false;
 }
 
-/*#
-*
-*/
 static int LuaConnect(lua_State* L)
 {
     DM_LUA_STACK_CHECK(L, 1);
@@ -463,15 +424,11 @@ static int LuaSend(lua_State* L)
 
 void HttpServerRequestCallback(void* user_data, wsHttpServer::Request* request)
 {
+    if (g_Websocket.m_Connections.Size() >= g_Websocket.m_Server->m_Connections.Capacity()) {
+        request->m_CloseConnection = 1;
+        return;
+    }
     request->m_RemoveConnection = 1;
-    request->m_StatusCode = 101;
-
-    dmSocket::Address address;
-    uint16_t port;
-    dmSocket::GetName(request->m_Socket, &address, &port);
-    char* ip_address = dmSocket::AddressToIPString(address);
-    dmLogInfo("address %s, port %d", ip_address, port);
-    free(ip_address);
 
     WebsocketConnection* conn = ConvertToConnection(request->m_Socket);
     conn->m_ConnectTimeout = dmTime::GetTime() + 3000 * 1000;
@@ -498,14 +455,15 @@ static int LuaListen(lua_State* L)
         return DM_LUA_ERROR("The web server is already initialized");
 
     const int port = luaL_checkinteger(L, 1);
-    const char* path = luaL_checkstring(L, 2);
-    g_Websocket.m_ServerCallback = dmScript::CreateCallback(L, 3);
+    const int max_connections = luaL_checkinteger(L, 2);
+    const int connection_timeout = luaL_checkinteger(L, 3);
+    g_Websocket.m_ServerCallback = dmScript::CreateCallback(L, 4);
 
     wsHttpServer::NewParams http_params;
     http_params.m_Userdata = 0;
     http_params.m_HttpRequest = HttpServerRequestCallback;
-    http_params.m_MaxConnections = 16;
-    http_params.m_ConnectionTimeout = 60;
+    http_params.m_MaxConnections = max_connections;
+    http_params.m_ConnectionTimeout = connection_timeout;
 
     wsHttpServer::HServer server;
     wsHttpServer::Result result = wsHttpServer::New(&http_params, port, &server);
@@ -622,7 +580,6 @@ void HandleCallback(WebsocketConnection* conn, int event, int msg_offset, int ms
     dmScript::TeardownCallback(conn->m_Callback);
 }
 
-
 HttpHeader::HttpHeader(const char* key, const char* value)
 {
     m_Key = strdup(key);
@@ -657,7 +614,6 @@ HandshakeResponse::~HandshakeResponse()
         delete m_Headers[i];
     }
 }
-
 
 // ***************************************************************************************************
 // Life cycle functions

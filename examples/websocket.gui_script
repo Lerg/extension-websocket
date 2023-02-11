@@ -100,9 +100,10 @@ end
 
 local function listen(self)
 	local port = PORT
-	local path = "/"
-	log("Listening on :" .. port .. path)
-	websocket.listen(port, path, websocket_callback)
+	local max_connections = 16
+	local connection_timeout = 1
+	log("Listening on :" .. port)
+	websocket.listen(port, max_connections, connection_timeout, websocket_callback)
 end
 
 local function stop_listening(self)

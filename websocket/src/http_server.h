@@ -25,10 +25,7 @@ namespace wsHttpServer
      * Http methods sending data, eg put and post, are not supported.
      */
 
-    /**
-     * Http-server handle
-     */
-    typedef struct Server* HServer;
+    const uint32_t BUFFER_SIZE = 64 * 1024;
 
     /**
      * Result codes
@@ -43,11 +40,11 @@ namespace wsHttpServer
         RESULT_UNKNOWN = -1000,      //!< RESULT_UNKNOWN
     };
 
-    /**
-     * Set NewParams default values
-     * @param params Pointer to NewParams
-     */
-    void SetDefaultParams(struct NewParams* params);
+    struct Connection
+    {
+        dmSocket::Socket m_Socket;
+        uint64_t         m_ConnectionTimeStart;
+    };
 
     /**
      * Http request. Contains relevant information about the request. Passed into #HttpResponse callback
@@ -56,33 +53,16 @@ namespace wsHttpServer
     {
         Result   m_Result;
         dmSocket::Socket m_Socket;
-        Server*  m_Server;
 
         char     m_Method[16];
         char     m_Resource[128];
 
-        int      m_StatusCode;
-
-        // Offset to where content start in buffer. This the extra content read while parsing headers
-        // The value is adjusted in Receive when data is consumed
-        uint32_t m_ContentOffset;
-        // Total amount of data received in Server.m_Buffer
-        uint32_t m_TotalReceived;
-
-        // Total content received, ie the payload
-        uint32_t m_TotalContentReceived;
-
-        // Number of bytes in send buffer
-        uint32_t m_SendBufferPos;
-
         uint16_t m_RemoveConnection : 1;
-        uint16_t m_HeaderSent : 1;
-        uint16_t m_AttributesSent : 1;
+        uint16_t m_CloseConnection : 1;
 
         Request()
         {
             memset(this, 0, sizeof(*this));
-            m_StatusCode = 200;
         }
     };
 
@@ -92,6 +72,39 @@ namespace wsHttpServer
      * @param request Request information
      */
     typedef void (*HttpRequest)(void* user_data, Request* request);
+
+    struct Server
+    {
+        Server()
+        {
+            m_ServerSocket = dmSocket::INVALID_SOCKET_HANDLE;
+            m_Reconnect = 0;
+        }
+        dmSocket::Address   m_Address;
+        uint16_t            m_Port;
+        HttpRequest         m_HttpRequest;
+        void*               m_Userdata;
+
+        // Connection timeout in useconds. NOTE: In params it is specified in seconds.
+        uint64_t            m_ConnectionTimeout;
+        dmArray<Connection> m_Connections;
+        dmSocket::Socket    m_ServerSocket;
+        // Receive and send buffer
+        char                m_Buffer[BUFFER_SIZE];
+
+        uint32_t            m_Reconnect : 1;
+    };
+
+    /**
+     * Http-server handle
+     */
+    typedef struct Server* HServer;
+
+    /**
+     * Set NewParams default values
+     * @param params Pointer to NewParams
+     */
+    void SetDefaultParams(struct NewParams* params);
 
     /**
      * Parameters passed into #New when creating a new server instance

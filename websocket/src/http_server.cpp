@@ -20,42 +20,10 @@
 #include <dmsdk/dlib/dstrings.h>
 #include <dmsdk/dlib/time.h>
 #include <dmsdk/dlib/math.h>
-#include <dlib/socket.h>
 #include "http_server.h"
 
 namespace wsHttpServer
 {
-    const uint32_t BUFFER_SIZE = 64 * 1024;
-
-    struct Connection
-    {
-        dmSocket::Socket m_Socket;
-        uint16_t         m_RequestCount;
-        uint64_t         m_ConnectionTimeStart;
-    };
-
-    struct Server
-    {
-        Server()
-        {
-            m_ServerSocket = dmSocket::INVALID_SOCKET_HANDLE;
-            m_Reconnect = 0;
-        }
-        dmSocket::Address   m_Address;
-        uint16_t            m_Port;
-        HttpRequest         m_HttpRequest;
-        void*               m_Userdata;
-
-        // Connection timeout in useconds. NOTE: In params it is specified in seconds.
-        uint64_t            m_ConnectionTimeout;
-        dmArray<Connection> m_Connections;
-        dmSocket::Socket    m_ServerSocket;
-        // Receive and send buffer
-        char                m_Buffer[BUFFER_SIZE];
-
-        uint32_t            m_Reconnect : 1;
-    };
-
     void SetDefaultParams(struct NewParams* params)
     {
         memset(params, 0, sizeof(*params));
@@ -164,28 +132,34 @@ namespace wsHttpServer
 
     /*
      * Handle an http-connection
-     * Returns false if the connection should be removed
+     * Returns 0 - do nothing, 1 - remove, 2 - close.
      */
-    static bool HandleConnection(Server* server, Connection* connection)
+    static uint8_t HandleConnection(Server* server, Connection* connection)
     {
         int total_recv = 0;
 
         Request request;
         request.m_Result = RESULT_OK;
         request.m_Socket = connection->m_Socket;
-        request.m_Server = server;
 
         server->m_HttpRequest(server->m_Userdata, &request);
-        connection->m_RequestCount = 1;
 
         if (request.m_Result == RESULT_OK)
         {
-            return (bool) !request.m_RemoveConnection;
+            if (request.m_RemoveConnection)
+            {
+                return 1;
+            }
+            else if (request.m_CloseConnection)
+            {
+                return 2;
+            }
         }
         else
         {
-            return false;
+            return 2;
         }
+        return 0;
     }
 
     Result Update(HServer server)
@@ -227,7 +201,6 @@ namespace wsHttpServer
                     memset(&connection, 0, sizeof(connection));
                     connection.m_Socket = client_socket;
                     connection.m_ConnectionTimeStart = dmTime::GetTime();
-                    connection.m_RequestCount = 0;
                     server->m_Connections.Push(connection);
                 }
             }
@@ -273,9 +246,17 @@ namespace wsHttpServer
             Connection* connection = &server->m_Connections[i];
             if (dmSocket::SelectorIsSet(&selector, dmSocket::SELECTOR_KIND_READ, connection->m_Socket))
             {
-                bool keep_connection = HandleConnection(server, connection);
-                if (!keep_connection)
+                uint8_t keep_connection = HandleConnection(server, connection);
+                if (keep_connection == 1) // Remove
                 {
+                    server->m_Connections.EraseSwap(i);
+                    --i;
+                }
+                else if (keep_connection == 2) // Close
+                {
+                    dmSocket::Shutdown(connection->m_Socket, dmSocket::SHUTDOWNTYPE_READWRITE);
+                    dmSocket::Delete(connection->m_Socket);
+                    connection->m_Socket = dmSocket::INVALID_SOCKET_HANDLE;
                     server->m_Connections.EraseSwap(i);
                     --i;
                 }
