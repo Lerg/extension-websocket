@@ -537,6 +537,7 @@ static int LuaStopListening(lua_State* L)
 
     wsHttpServer::Delete(g_Websocket.m_Server);
     g_Websocket.m_Server = 0;
+    return 0;
 }
 
 void HandleCallback(WebsocketConnection* conn, int event, int msg_offset, int msg_length)
